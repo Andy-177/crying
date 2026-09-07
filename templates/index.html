@@ -135,25 +135,18 @@
 
     async function loadChallenge() {
         try {
-            const d = cry.qp('difficulty', null);
-            const h = cry.qp('heavy', null);
-            const m = cry.qp('memory', null);
-            const params = [];
-            if (d !== null) params.push('difficulty=' + d);
-            if (h !== null) params.push('heavy=' + h);
-            if (m !== null) params.push('memory=' + m);
-            const r = await fetch('/api/challenge' + (params.length ? '?' + params.join('&') : ''));
+            const r = await fetch('/api/challenge');
             challenge = await r.json();
             $('chid').textContent = challenge.challenge_id;
             $('seed').textContent = challenge.seed;
             $('diff').textContent = challenge.difficulty + ' bit 前导零';
             $('iter').textContent = challenge.iterations;
             $('mem').textContent = challenge.memory + ' MB';
-            $('workers').textContent = cry.qp('workers', cry.CONFIG.workerCount);
+            $('workers').textContent = challenge.workers;
             $('bestT').textContent = challenge.difficulty;
             log('任务已下发 challenge_id=' + challenge.challenge_id +
                 ' 难度=' + challenge.difficulty + 'bit heavy=' + challenge.iterations +
-                ' memory=' + challenge.memory + 'MB');
+                ' memory=' + challenge.memory + 'MB workers=' + challenge.workers);
             $('btnStart').disabled = false;
             status('就绪 · 点击开始验证');
         } catch (e) {
@@ -169,11 +162,10 @@
         $('btnStop').disabled = false;
 
         const cfg = {
-            workerCount: cry.qp('workers', cry.CONFIG.workerCount),
-            heavyThreads: cry.qp('heavy', cry.CONFIG.heavyThreads),
-            memoryPerWorkerMB: cry.qp('memory', cry.CONFIG.memoryPerWorkerMB),
-            cpuIntensity: cry.qp('cpu', cry.CONFIG.cpuIntensity),
-            intervalMs: cry.qp('interval', cry.CONFIG.intervalMs)
+            workerCount: challenge.workers || cry.CONFIG.workerCount,
+            cpuIntensity: 1,
+            intervalMs: challenge.interval_ms || cry.CONFIG.intervalMs,
+            chunk: challenge.chunk || cry.CONFIG.chunk
         };
 
         engine = new cry.Miner(challenge, cfg);

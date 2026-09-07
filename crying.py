@@ -1,21 +1,67 @@
 import hashlib
+import hmac
+import json
 import os
+import secrets
+import string
+import sys
 import time
 import uuid
+from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request
+
+APP_DIR = Path(sys.argv[0]).parent.resolve()
 
 app = Flask(__name__)
 
 ENGINE = "cry-v3"
-DEFAULT_DIFFICULTY = int(os.environ.get("CRYING_DIFFICULTY", "8"))
-DEFAULT_HEAVY = int(os.environ.get("CRYING_HEAVY", "512"))
-DEFAULT_MEMORY = int(os.environ.get("CRYING_MEMORY", "4"))
 CHALLENGE_TTL = 600
 MAX_DIFFICULTY = 128
 MAX_ITERATIONS = 65536
 MAX_MEMORY = 16
 WORD_MASK = 0xFFFFFFFF
+
+DEFAULTS = {
+    "difficulty": 8,
+    "heavy": 512,
+    "memory": 4,
+    "workers": 32,
+    "interval_ms": 500,
+    "chunk": 64,
+    "passkey": True,
+}
+
+CONFIG = dict(DEFAULTS)
+PASSKEY_FILE = APP_DIR / "passkey.txt"
+_CONFIG_FILE = APP_DIR / "config.json"
+if _CONFIG_FILE.is_file():
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as _f:
+            _user_cfg = json.load(_f)
+        if isinstance(_user_cfg, dict):
+            _cfg_passkey = _user_cfg.get("passkey")
+            if _cfg_passkey is not None:
+                CONFIG["passkey"] = bool(_cfg_passkey)
+            _section = _user_cfg.get("cry")
+            if not isinstance(_section, dict):
+                _section = _user_cfg
+            for _k in DEFAULTS:
+                if _k in _section:
+                    CONFIG[_k] = _section[_k]
+    except (OSError, ValueError):
+        pass
+
+PASSKEY = ""
+if CONFIG["passkey"]:
+    try:
+        if PASSKEY_FILE.is_file():
+            PASSKEY = PASSKEY_FILE.read_text("utf-8", errors="replace").strip()
+        if not PASSKEY:
+            PASSKEY = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(256))
+            PASSKEY_FILE.write_text(PASSKEY, "utf-8")
+    except OSError:
+        PASSKEY = ""
 
 challenges = {}
 solutions = {}
@@ -50,7 +96,7 @@ def prune():
         solutions.pop(cid, None)
 
 
-def issue_challenge(difficulty, steps, memory):
+def issue_challenge(difficulty, steps, memory, from_url=""):
     cid = uuid.uuid4().hex
     seed = os.urandom(24).hex()
     challenges[cid] = {
@@ -58,6 +104,7 @@ def issue_challenge(difficulty, steps, memory):
         "difficulty": difficulty,
         "iterations": steps,
         "memory": memory,
+        "from_url": from_url,
         "issued_at": time.time(),
     }
     return cid, seed
@@ -117,25 +164,29 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/from/<path:url>")
+def from_url(url):
+    qs = request.query_string.decode("utf-8", "replace")
+    target = url if not qs else url + "?" + qs
+    resp = redirect("/")
+    if target and len(target) <= 2048:
+        resp.set_cookie("crying_from", target, max_age=1800, path="/", httponly=True)
+    return resp
+
+
 @app.route("/api/challenge")
 def api_challenge():
     prune()
-    try:
-        difficulty = int(request.args.get("difficulty", DEFAULT_DIFFICULTY))
-    except (TypeError, ValueError):
-        difficulty = DEFAULT_DIFFICULTY
-    difficulty = max(1, min(MAX_DIFFICULTY, difficulty))
-    try:
-        steps = int(request.args.get("heavy", DEFAULT_HEAVY))
-    except (TypeError, ValueError):
-        steps = DEFAULT_HEAVY
-    steps = max(1, min(MAX_ITERATIONS, steps))
-    try:
-        memory = int(request.args.get("memory", DEFAULT_MEMORY))
-    except (TypeError, ValueError):
-        memory = DEFAULT_MEMORY
-    memory = clamp_memory(memory)
-    cid, seed = issue_challenge(difficulty, steps, memory)
+    difficulty = max(1, min(MAX_DIFFICULTY, int(CONFIG["difficulty"])))
+    steps = max(1, min(MAX_ITERATIONS, int(CONFIG["heavy"])))
+    memory = clamp_memory(int(CONFIG["memory"]))
+    workers = max(1, min(64, int(CONFIG["workers"])))
+    interval_ms = max(50, int(CONFIG["interval_ms"]))
+    chunk = max(16, int(CONFIG["chunk"]))
+    from_cookie = request.cookies.get("crying_from", "")
+    if not isinstance(from_cookie, str) or len(from_cookie) > 2048:
+        from_cookie = ""
+    cid, seed = issue_challenge(difficulty, steps, memory, from_cookie)
     return jsonify({
         "ok": True,
         "challenge_id": cid,
@@ -143,6 +194,9 @@ def api_challenge():
         "difficulty": difficulty,
         "iterations": steps,
         "memory": memory,
+        "workers": workers,
+        "interval_ms": interval_ms,
+        "chunk": chunk,
         "engine": ENGINE,
     })
 
@@ -180,6 +234,7 @@ def api_verify():
     replay_ms = int((time.perf_counter() - replay_start) * 1000)
 
     elapsed_sec = round(time.time() - challenge["issued_at"], 2)
+    from_url = challenge.get("from_url", "")
 
     solutions[cid] = {
         "difficulty": difficulty,
@@ -191,6 +246,7 @@ def api_verify():
         "winner_digest": digest,
         "replay_ms": replay_ms,
         "elapsed_sec": elapsed_sec,
+        "from_url": from_url,
         "solved_at": time.time(),
     }
     challenges.pop(cid, None)
@@ -208,11 +264,23 @@ def success():
     proof = solutions.get(cid)
     if proof is None:
         return redirect("/")
+    from_url = proof.get("from_url", "")
+    visit_href = from_url
+    if CONFIG["passkey"] and from_url:
+        gate_key = str(secrets.randbelow(1 << 128))
+        pass_code = hmac.new(
+            PASSKEY.encode("utf-8"), gate_key.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        visit_href = "{}/crying?pass={}&key={}".format(
+            from_url, pass_code, gate_key
+        )
     return render_template(
         "success.html",
         cid=cid,
         stats=proof,
         elapsed_sec=proof["elapsed_sec"],
+        from_url=from_url,
+        visit_href=visit_href,
     )
 
 
