@@ -187,7 +187,7 @@ def api_challenge():
     if not isinstance(from_cookie, str) or len(from_cookie) > 2048:
         from_cookie = ""
     cid, seed = issue_challenge(difficulty, steps, memory, from_cookie)
-    return jsonify({
+    resp = jsonify({
         "ok": True,
         "challenge_id": cid,
         "seed": seed,
@@ -199,6 +199,8 @@ def api_challenge():
         "chunk": chunk,
         "engine": ENGINE,
     })
+    resp.set_cookie("crying_from", "", expires=0, max_age=0, path="/", httponly=True)
+    return resp
 
 
 @app.route("/api/verify", methods=["POST"])
