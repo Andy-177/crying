@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crying · 验证</title>
+<style>
+  :root { --ink: #111; --mut: #6b7280; --line: #e5e5e5; --bg: #fff; --blue: #0284c7; --red: #dc2626; --sky: #38bdf8; }
+  * { box-sizing: border-box; border-radius: 0; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .wrap { width: 100%; max-width: 560px; margin: 0; padding: 44px 24px 20px; }
+  .wrap.foot { flex: 1; padding: 26px 24px 32px; }
+
+  .brand { font-size: 60px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+
+  .actions { display: flex; gap: 12px; margin-top: 26px; padding: 0 24px; justify-content: flex-start; }
+  .btn {
+    border: none; cursor: pointer; padding: 8px 32px;
+    background: var(--blue); color: #fff; font: inherit; font-size: 15px; letter-spacing: 0.1em;
+  }
+  .btn.danger { background: var(--red); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+  .prog { width: 100%; margin-top: 4px; padding: 0 24px; }
+  .prog-row { display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .bar { height: 16px; background: #eee; }
+  .bar i { display: block; height: 100%; width: 0%; background: var(--sky); }
+  .pct { font-family: sans-serif; font-size: 15px; padding-left: 12px; font-variant-numeric: tabular-nums; }
+  .counts { font-family: sans-serif; font-size: 12px; color: var(--mut); padding: 6px 0 0; font-variant-numeric: tabular-nums; }
+
+  .tog {
+    width: 100%; text-align: left; background: none; border: none;
+    padding: 14px 0; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; color: var(--ink);
+  }
+  .tog .caret { display: inline-block; width: 14px; color: var(--mut); font-size: 11px; }
+  .panel { font-size: 13px; padding: 2px 0 14px; }
+  .panel dl { display: grid; grid-template-columns: 120px 1fr; row-gap: 5px; column-gap: 12px; }
+  .panel dt { color: var(--mut); }
+  .panel dd { font-family: sans-serif; word-break: break-all; }
+  [hidden] { display: none !important; }
+
+  #logs { font-family: sans-serif; font-size: 12px; line-height: 1.8; color: var(--ink);
+          max-height: 220px; overflow-y: auto; }
+  #logs .log-line { white-space: pre-wrap; word-break: break-all; }
+  #logs .mut { color: var(--mut); }
+
+  .status { font-family: sans-serif; font-size: 20px; color: var(--mut); width: 100%; padding: 0 24px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <h1 class="brand">Crying</h1>
+</div>
+
+<div class="status" id="statusbar">就绪 · 获取任务中…</div>
+
+<div class="prog">
+  <div class="prog-row">
+    <div class="bar"><i id="fill"></i></div>
+    <div class="pct" id="pct">0%</div>
+  </div>
+  <div class="counts" id="counts">-</div>
+</div>
+
+<div class="actions">
+  <button class="btn" id="btnStart">开始验证</button>
+  <button class="btn danger" id="btnStop" disabled>停止</button>
+</div>
+
+<div class="wrap foot">
+  <button class="tog" id="infoToggle"><span class="caret" id="infoCaret">▶</span>详细信息</button>
+  <div class="panel" id="info" hidden>
+    <dl>
+      <dt>challenge_id</dt><dd id="chid">-</dd>
+      <dt>seed</dt><dd id="seed">-</dd>
+      <dt>difficulty</dt><dd id="diff">-</dd>
+      <dt>iterations</dt><dd id="iter">-</dd>
+      <dt>memory</dt><dd id="mem">-</dd>
+      <dt>engine</dt><dd>cry (cry-v3)</dd>
+      <dt>workers</dt><dd id="workers">-</dd>
+      <dt>best 前导零</dt><dd id="best">0 / <span id="bestT">-</span></dd>
+      <dt>已尝试</dt><dd id="attempts">0</dd>
+    </dl>
+  </div>
+
+  <button class="tog" id="logToggle"><span class="caret" id="logCaret">▶</span>日志</button>
+  <div class="panel" id="logs" hidden></div>
+</div>
+
+<script src="/static/cry.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let challenge = null;
+    let engine = null;
+    let running = false;
+
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n) => n.toLocaleString('en-US');
+
+    function status(text) { $('statusbar').textContent = text; }
+
+    function log(text, cls) {
+        const el = document.createElement('div');
+        el.className = 'log-line' + (cls ? ' ' + cls : '');
+        el.textContent = text;
+        const box = $('logs');
+        box.appendChild(el);
+        while (box.childNodes.length > 500) box.removeChild(box.firstChild);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function toggle(panel, caret) {
+        const open = panel.hidden === false;
+        panel.hidden = open;
+        caret.textContent = open ? '▶' : '▼';
+    }
+
+    function setPct(st) {
+        const pct = st.pct || 0;
+        $('fill').style.width = pct.toFixed(4) + '%';
+        $('pct').textContent = pct.toFixed(1) + '%';
+        $('counts').textContent = fmt(st.walk_done) + ' / ' + fmt(st.expected_walk) + ' 算法步（期望） · ' +
+            fmt(st.attempts) + ' / ' + fmt(st.expected_attempts) + ' 次尝试（期望）';
+    }
+
+    async function loadChallenge() {
+        try {
+            const d = cry.qp('difficulty', null);
+            const h = cry.qp('heavy', null);
+            const m = cry.qp('memory', null);
+            const params = [];
+            if (d !== null) params.push('difficulty=' + d);
+            if (h !== null) params.push('heavy=' + h);
+            if (m !== null) params.push('memory=' + m);
+            const r = await fetch('/api/challenge' + (params.length ? '?' + params.join('&') : ''));
+            challenge = await r.json();
+            $('chid').textContent = challenge.challenge_id;
+            $('seed').textContent = challenge.seed;
+            $('diff').textContent = challenge.difficulty + ' bit 前导零';
+            $('iter').textContent = challenge.iterations;
+            $('mem').textContent = challenge.memory + ' MB';
+            $('workers').textContent = cry.qp('workers', cry.CONFIG.workerCount);
+            $('bestT').textContent = challenge.difficulty;
+            log('任务已下发 challenge_id=' + challenge.challenge_id +
+                ' 难度=' + challenge.difficulty + 'bit heavy=' + challenge.iterations +
+                ' memory=' + challenge.memory + 'MB');
+            $('btnStart').disabled = false;
+            status('就绪 · 点击开始验证');
+        } catch (e) {
+            log('获取任务失败: ' + e.message, 'mut');
+            status('错误 · 获取任务失败');
+        }
+    }
+
+    function start() {
+        if (!challenge || running) return;
+        running = true;
+        $('btnStart').disabled = true;
+        $('btnStop').disabled = false;
+
+        const cfg = {
+            workerCount: cry.qp('workers', cry.CONFIG.workerCount),
+            heavyThreads: cry.qp('heavy', cry.CONFIG.heavyThreads),
+            memoryPerWorkerMB: cry.qp('memory', cry.CONFIG.memoryPerWorkerMB),
+            cpuIntensity: cry.qp('cpu', cry.CONFIG.cpuIntensity),
+            intervalMs: cry.qp('interval', cry.CONFIG.intervalMs)
+        };
+
+        engine = new cry.Miner(challenge, cfg);
+        engine.start({
+            log: (m) => log(m),
+            walk: (w) => {
+                const hex8 = ('00000000' + (w.w >>> 0).toString(16)).slice(-8);
+                log('触达页 #' + w.page + ' · 页内偏移 #' + w.off + ' · 全局地址 0x' +
+                    w.addr.toString(16) + ' · 读回旧值 0x' + hex8 +
+                    '，按位回写混洗，pos/a 依数据分岔跳转 · worker #' + w.worker);
+            },
+            stats: (st) => {
+                setPct(st);
+                $('best').textContent = st.best_zeros + ' / ' + challenge.difficulty;
+                $('attempts').textContent = fmt(st.attempts);
+                status('挖掘中 · ' + st.active + '/' + st.total + ' workers · ' +
+                    fmt(st.attempts) + ' 次哈希 · ' + fmt(st.hashrate) + ' H/s · ' +
+                    '算法步 ' + fmt(st.walk_done) + ' · ' + fmt(st.walk_rate) + ' 步/s · ' +
+                    '当前步 ' + st.walk_i + '/' + st.walk_steps + ' · best ' + st.best_zeros +
+                    '/' + challenge.difficulty + ' · ' + st.elapsed + 's');
+            },
+            solved: (res) => {
+                running = false;
+                $('fill').style.width = '100%';
+                $('pct').textContent = '100%';
+                $('btnStop').disabled = true;
+                status('验证通过 · 正在跳转…');
+                log('验证通过 redirect=' + res.success_url, 'mut');
+                setTimeout(function () { window.location.href = res.success_url; }, 800);
+            },
+            error: (res) => {
+                running = false;
+                $('btnStart').disabled = false;
+                $('btnStop').disabled = true;
+                status('验证失败 · ' + (res.message || '未知错误'));
+                log('验证失败: ' + (res.message || JSON.stringify(res)), 'mut');
+            }
+        });
+        log('Cry 引擎启动 · ' + cfg.workerCount + ' workers · 调度风暴与 PoW 同路径');
+        status('挖掘中 · 引擎已启动…');
+    }
+
+    function stop() {
+        if (engine) engine.stop();
+        running = false;
+        $('btnStart').disabled = true;
+        $('btnStop').disabled = true;
+        status('已停止 · 可刷新页面重新开始');
+    }
+
+    $('btnStart').addEventListener('click', () => {
+        if (running) return;
+        if (!challenge) { loadChallenge().then(start); return; }
+        start();
+    });
+    $('btnStop').addEventListener('click', stop);
+
+    $('infoToggle').addEventListener('click', () => toggle($('info'), $('infoCaret')));
+    $('logToggle').addEventListener('click', () => toggle($('logs'), $('logCaret')));
+
+    $('btnStart').disabled = true;
+    loadChallenge();
+})();
+</script>
+</body>
+</html>
