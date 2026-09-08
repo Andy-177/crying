@@ -3,11 +3,13 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import string
 import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, redirect, render_template, request
 
@@ -30,10 +32,12 @@ DEFAULTS = {
     "interval_ms": 500,
     "chunk": 64,
     "passkey": True,
+    "keymap": True,
 }
 
 CONFIG = dict(DEFAULTS)
 PASSKEY_FILE = APP_DIR / "passkey.txt"
+KEYMAP_FILE = APP_DIR / "keymap.db"
 _CONFIG_FILE = APP_DIR / "config.json"
 if _CONFIG_FILE.is_file():
     try:
@@ -43,6 +47,9 @@ if _CONFIG_FILE.is_file():
             _cfg_passkey = _user_cfg.get("passkey")
             if _cfg_passkey is not None:
                 CONFIG["passkey"] = bool(_cfg_passkey)
+            _cfg_keymap = _user_cfg.get("keymap")
+            if _cfg_keymap is not None:
+                CONFIG["keymap"] = bool(_cfg_keymap)
             _section = _user_cfg.get("cry")
             if not isinstance(_section, dict):
                 _section = _user_cfg
@@ -56,7 +63,8 @@ else:
         with open(_CONFIG_FILE, "w", encoding="utf-8") as _f:
             json.dump({
                 "passkey": CONFIG["passkey"],
-                "cry": {_k: CONFIG[_k] for _k in DEFAULTS if _k != "passkey"},
+                "keymap": CONFIG["keymap"],
+                "cry": {_k: CONFIG[_k] for _k in DEFAULTS if _k not in ("passkey", "keymap")},
             }, _f, ensure_ascii=False, indent=2)
             _f.write("\n")
     except OSError:
@@ -72,6 +80,65 @@ if CONFIG["passkey"]:
             PASSKEY_FILE.write_text(PASSKEY, "utf-8")
     except OSError:
         PASSKEY = ""
+
+
+def _keymap_unique(existing):
+    while True:
+        k = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(256))
+        if k not in existing:
+            return k
+
+
+def init_keymap():
+    if not CONFIG.get("passkey"):
+        return
+    try:
+        conn = sqlite3.connect(str(KEYMAP_FILE))
+        conn.execute("CREATE TABLE IF NOT EXISTS keymap (domain TEXT PRIMARY KEY, priv_key TEXT)")
+        conn.execute("DELETE FROM keymap WHERE domain IS NULL OR TRIM(domain) = ''")
+        rows = conn.execute("SELECT domain, priv_key FROM keymap").fetchall()
+        existing = {k for _, k in rows if k}
+        for d, k in rows:
+            if not k:
+                nk = _keymap_unique(existing)
+                conn.execute("UPDATE keymap SET priv_key = ? WHERE domain = ?", (nk, d))
+                existing.add(nk)
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+
+def resolve_from_key(href_target):
+    try:
+        parts = urlsplit(href_target)
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname.lower()
+    best = ("", 0)
+    exact = ""
+    try:
+        conn = sqlite3.connect(str(KEYMAP_FILE))
+        rows = conn.execute("SELECT domain, priv_key FROM keymap").fetchall()
+        conn.close()
+    except sqlite3.Error:
+        rows = ()
+    host = host[:-1] if host.endswith(".") else host
+    for d, k in rows:
+        if not d or not k:
+            continue
+        dl = d.lstrip(".").lower()
+        if dl == host:
+            exact = k
+        if d.startswith(".") and host.endswith(d.lower()):
+            if len(d) > best[1]:
+                best = (k, len(d))
+    return exact or best[0]
+
+
+init_keymap()
 
 challenges = {}
 solutions = {}
@@ -322,6 +389,15 @@ def success():
             PASSKEY.encode("utf-8"), challenge_code.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         visit_href = "{}/crying?sign={}".format(from_url, sign)
+    elif CONFIG["passkey"] and from_url and CONFIG["keymap"]:
+        priv_key = resolve_from_key(from_url)
+        if priv_key:
+            passcode = hmac.new(
+                PASSKEY.encode("utf-8"), priv_key.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            visit_href = "{}/crying?passcode={}".format(from_url, passcode)
+        else:
+            visit_href = from_url
     elif CONFIG["passkey"] and from_url:
         gate_key = str(secrets.randbelow(1 << 128))
         pass_code = hmac.new(
