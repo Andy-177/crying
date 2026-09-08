@@ -51,6 +51,16 @@ if _CONFIG_FILE.is_file():
                     CONFIG[_k] = _section[_k]
     except (OSError, ValueError):
         pass
+else:
+    try:
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as _f:
+            json.dump({
+                "passkey": CONFIG["passkey"],
+                "cry": {_k: CONFIG[_k] for _k in DEFAULTS if _k != "passkey"},
+            }, _f, ensure_ascii=False, indent=2)
+            _f.write("\n")
+    except OSError:
+        pass
 
 PASSKEY = ""
 if CONFIG["passkey"]:
@@ -96,7 +106,7 @@ def prune():
         solutions.pop(cid, None)
 
 
-def issue_challenge(difficulty, steps, memory, from_url=""):
+def issue_challenge(difficulty, steps, memory, from_url="", from_mode="", challenge_code=""):
     cid = uuid.uuid4().hex
     seed = os.urandom(24).hex()
     challenges[cid] = {
@@ -105,6 +115,8 @@ def issue_challenge(difficulty, steps, memory, from_url=""):
         "iterations": steps,
         "memory": memory,
         "from_url": from_url,
+        "from_mode": from_mode,
+        "challenge_code": challenge_code,
         "issued_at": time.time(),
     }
     return cid, seed
@@ -174,6 +186,23 @@ def from_url(url):
     return resp
 
 
+@app.route("/session")
+def session_gate():
+    if not CONFIG["passkey"]:
+        return jsonify({
+            "ok": False,
+            "message": "passkey 未开启，无法使用 /session",
+        }), 403
+    code = request.args.get("challenge_code", "")
+    frm = request.args.get("from", "")
+    resp = redirect("/")
+    if isinstance(code, str) and code and len(code) <= 2048:
+        resp.set_cookie("crying_sess_code", code, max_age=1800, path="/", httponly=True)
+    if isinstance(frm, str) and frm and len(frm) <= 2048:
+        resp.set_cookie("crying_sess_from", frm, max_age=1800, path="/", httponly=True)
+    return resp
+
+
 @app.route("/api/challenge")
 def api_challenge():
     prune()
@@ -183,10 +212,22 @@ def api_challenge():
     workers = max(1, min(64, int(CONFIG["workers"])))
     interval_ms = max(50, int(CONFIG["interval_ms"]))
     chunk = max(16, int(CONFIG["chunk"]))
+    sess_code = request.cookies.get("crying_sess_code", "")
+    sess_from = request.cookies.get("crying_sess_from", "")
+    if not isinstance(sess_code, str) or len(sess_code) > 2048:
+        sess_code = ""
+    if not isinstance(sess_from, str) or len(sess_from) > 2048:
+        sess_from = ""
     from_cookie = request.cookies.get("crying_from", "")
     if not isinstance(from_cookie, str) or len(from_cookie) > 2048:
         from_cookie = ""
-    cid, seed = issue_challenge(difficulty, steps, memory, from_cookie)
+    if sess_code and sess_from:
+        from_url, from_mode, challenge_code = sess_from, "session", sess_code
+    elif from_cookie:
+        from_url, from_mode, challenge_code = from_cookie, "from", ""
+    else:
+        from_url, from_mode, challenge_code = "", "", ""
+    cid, seed = issue_challenge(difficulty, steps, memory, from_url, from_mode, challenge_code)
     resp = jsonify({
         "ok": True,
         "challenge_id": cid,
@@ -200,6 +241,8 @@ def api_challenge():
         "engine": ENGINE,
     })
     resp.set_cookie("crying_from", "", expires=0, max_age=0, path="/", httponly=True)
+    resp.set_cookie("crying_sess_code", "", expires=0, max_age=0, path="/", httponly=True)
+    resp.set_cookie("crying_sess_from", "", expires=0, max_age=0, path="/", httponly=True)
     return resp
 
 
@@ -237,6 +280,8 @@ def api_verify():
 
     elapsed_sec = round(time.time() - challenge["issued_at"], 2)
     from_url = challenge.get("from_url", "")
+    from_mode = challenge.get("from_mode", "")
+    challenge_code = challenge.get("challenge_code", "")
 
     solutions[cid] = {
         "difficulty": difficulty,
@@ -249,6 +294,8 @@ def api_verify():
         "replay_ms": replay_ms,
         "elapsed_sec": elapsed_sec,
         "from_url": from_url,
+        "from_mode": from_mode,
+        "challenge_code": challenge_code,
         "solved_at": time.time(),
     }
     challenges.pop(cid, None)
@@ -267,8 +314,15 @@ def success():
     if proof is None:
         return redirect("/")
     from_url = proof.get("from_url", "")
+    from_mode = proof.get("from_mode", "")
+    challenge_code = proof.get("challenge_code", "")
     visit_href = from_url
-    if CONFIG["passkey"] and from_url:
+    if from_url and from_mode == "session" and PASSKEY:
+        sign = hmac.new(
+            PASSKEY.encode("utf-8"), challenge_code.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        visit_href = "{}/crying?sign={}".format(from_url, sign)
+    elif CONFIG["passkey"] and from_url:
         gate_key = str(secrets.randbelow(1 << 128))
         pass_code = hmac.new(
             PASSKEY.encode("utf-8"), gate_key.encode("utf-8"), hashlib.sha256
