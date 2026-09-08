@@ -398,14 +398,6 @@ def success():
             visit_href = "{}/crying?passcode={}".format(from_url, passcode)
         else:
             visit_href = from_url
-    elif CONFIG["passkey"] and from_url:
-        gate_key = str(secrets.randbelow(1 << 128))
-        pass_code = hmac.new(
-            PASSKEY.encode("utf-8"), gate_key.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
-        visit_href = "{}/crying?pass={}&key={}".format(
-            from_url, pass_code, gate_key
-        )
     return render_template(
         "success.html",
         cid=cid,
